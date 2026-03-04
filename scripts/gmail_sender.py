@@ -19,6 +19,19 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 DEFAULT_DAILY_CAP = 20
 
 
+def _plain_to_html(text: str) -> str:
+    """Convert plain text email to clean HTML with proper paragraph spacing."""
+    import html as html_module
+    text = html_module.escape(text)
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    body_html = ""
+    for p in paragraphs:
+        # Preserve single line breaks within a paragraph (e.g., sign-off block)
+        p = p.replace("\n", "<br>")
+        body_html += f'<p style="margin:0 0 16px 0;line-height:1.5">{p}</p>\n'
+    return f"""<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#333">{body_html}</div>"""
+
+
 def _get_gmail_credentials() -> Credentials:
     """Load Gmail OAuth credentials from file or base64 env var."""
     b64 = os.environ.get("GMAIL_TOKEN_B64")
@@ -78,7 +91,9 @@ class GmailSender:
             logger.warning("Daily email cap (%d) reached. Skipping send to %s.", self.daily_cap, to_email)
             return {"status": "SKIPPED", "error": f"Daily cap of {self.daily_cap} reached"}
 
-        msg = MIMEText(body, "plain")
+        # Convert plain text to HTML for proper formatting
+        html_body = _plain_to_html(body)
+        msg = MIMEText(html_body, "html")
         msg["to"] = to_email
         msg["from"] = self.sender_email
         msg["subject"] = subject
