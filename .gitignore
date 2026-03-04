@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+session.json
+google_credentials.json
+gmail_oauth_credentials.json
+gmail_token.json
+luma-outreach-*.json
