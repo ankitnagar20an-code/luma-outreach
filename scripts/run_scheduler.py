@@ -179,6 +179,7 @@ def run_outreach_workflow(
     linkedin: LinkedInAutomation,
     gmail: GmailSender,
     prospects: list[dict],
+    linkedin_ok: bool = True,
 ) -> dict[str, int]:
     """Run full outreach on prospects: connections, InMails, DMs, emails. Returns counts."""
     counts = {"connections": 0, "inmails": 0, "dms": 0, "emails": 0}
@@ -198,7 +199,7 @@ def run_outreach_workflow(
         research_confidence = research_brief.get("confidence_score", 0.5)
 
         # ── Connection Request ──
-        if linkedin_url and counts["connections"] < MAX_CONNECTIONS:
+        if linkedin_ok and linkedin_url and counts["connections"] < MAX_CONNECTIONS:
             draft = claude.generate_connection_note(name, company, title, research_text)
             confidence = draft.get("confidence_score", 0.0)
             note = draft.get("draft_text", "")
@@ -214,7 +215,7 @@ def run_outreach_workflow(
                 sheet.log_activity("linkedin", "connection_request", name, "SKIPPED", note, evidence)
 
         # ── InMail (if not connected) ──
-        if linkedin_url and counts["inmails"] < 10:
+        if linkedin_ok and linkedin_url and counts["inmails"] < 10:
             draft = claude.generate_inmail(name, company, title, research_text)
             confidence = draft.get("confidence_score", 0.0)
             subject = draft.get("subject", "")
@@ -231,7 +232,7 @@ def run_outreach_workflow(
                 sheet.log_activity("linkedin", "inmail", name, "SKIPPED", text, evidence)
 
         # ── Follow-up DM ──
-        if linkedin_url and counts["dms"] < 15:
+        if linkedin_ok and linkedin_url and counts["dms"] < 15:
             draft = claude.generate_dm(name, company, title, research_text, "Initial connection")
             confidence = draft.get("confidence_score", 0.0)
             text = draft.get("draft_text", "")
@@ -280,12 +281,17 @@ def main() -> None:
     linkedin = LinkedInAutomation()
 
     try:
-        # Start browser
-        linkedin.start()
-        if not linkedin._check_login():
-            logger.error("LinkedIn session is invalid. Aborting.")
+        # Start browser — LinkedIn is optional, email still works without it
+        linkedin_ok = False
+        try:
+            linkedin.start()
+            linkedin_ok = linkedin._check_login()
+        except Exception as e:
+            logger.warning("LinkedIn browser failed to start: %s", e)
+
+        if not linkedin_ok:
+            logger.warning("LinkedIn session is invalid. Skipping LinkedIn actions, continuing with email.")
             sheet.log_activity("system", "session_check", "LinkedIn", "FAILED", "Session expired", [])
-            return
 
         # Load data from Google Sheet
         prospects = sheet.get_prospects(status_filter="active")
@@ -294,24 +300,28 @@ def main() -> None:
 
         logger.info("Loaded: %d prospects, %d targets, %d inbound messages", len(prospects), len(targets), len(inbound))
 
-        # ── Phase 1: LinkedIn Posts ──
-        logger.info("── Phase 1: LinkedIn Posts ──")
-        posts_made = run_post_workflow(sheet, search, claude, linkedin, targets)
-        logger.info("Posts published: %d/%d", posts_made, MAX_POSTS)
+        if linkedin_ok:
+            # ── Phase 1: LinkedIn Posts ──
+            logger.info("── Phase 1: LinkedIn Posts ──")
+            posts_made = run_post_workflow(sheet, search, claude, linkedin, targets)
+            logger.info("Posts published: %d/%d", posts_made, MAX_POSTS)
 
-        # ── Phase 2: LinkedIn Comments ──
-        logger.info("── Phase 2: LinkedIn Comments ──")
-        comments_made = run_comment_workflow(sheet, search, claude, linkedin, targets)
-        logger.info("Comments posted: %d/%d", comments_made, MAX_COMMENTS)
+            # ── Phase 2: LinkedIn Comments ──
+            logger.info("── Phase 2: LinkedIn Comments ──")
+            comments_made = run_comment_workflow(sheet, search, claude, linkedin, targets)
+            logger.info("Comments posted: %d/%d", comments_made, MAX_COMMENTS)
 
-        # ── Phase 3: Inbound Replies ──
-        logger.info("── Phase 3: Inbound Replies ──")
-        replies_sent = run_inbound_reply_workflow(sheet, search, claude, linkedin, inbound)
-        logger.info("Inbound replies sent: %d", replies_sent)
+            # ── Phase 3: Inbound Replies ──
+            logger.info("── Phase 3: Inbound Replies ──")
+            replies_sent = run_inbound_reply_workflow(sheet, search, claude, linkedin, inbound)
+            logger.info("Inbound replies sent: %d", replies_sent)
+        else:
+            logger.info("Skipping LinkedIn phases (1-3) — session not available")
 
         # ── Phase 4: Outreach (Connections, InMails, DMs, Emails) ──
+        # Email works even without LinkedIn; LinkedIn actions will be skipped gracefully
         logger.info("── Phase 4: Outreach ──")
-        outreach_counts = run_outreach_workflow(sheet, search, claude, linkedin, gmail, prospects)
+        outreach_counts = run_outreach_workflow(sheet, search, claude, linkedin, gmail, prospects, linkedin_ok=linkedin_ok)
         logger.info(
             "Outreach complete — Connections: %d, InMails: %d, DMs: %d, Emails: %d",
             outreach_counts["connections"],
