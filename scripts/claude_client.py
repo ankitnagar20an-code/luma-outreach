@@ -155,3 +155,45 @@ Respond with ONLY the JSON object as specified in the output schema. No other te
             "title": title, "search_results": search_results,
         })
         return self._call_llm(prompt)
+
+    def generate_sequence_email(
+        self,
+        prospect_name: str,
+        company: str,
+        title: str,
+        email: str,
+        research: str,
+        icp: str,
+        stage: int,
+        signals: str = "",
+    ) -> dict[str, Any]:
+        """Generate the correct sequence email for this ICP + stage."""
+        prompt = self._build_prompt("email_sequence", {
+            "prospect_name": prospect_name,
+            "company": company,
+            "title": title,
+            "email": email,
+            "icp": icp,
+            "stage": str(stage),
+            "research": research,
+            "signals": signals or "None provided",
+        })
+        return self._call_llm(prompt)
+
+    def classify_and_respond_reply(
+        self,
+        prospect_name: str,
+        company: str,
+        reply_text: str,
+        original_email_stage: int,
+        icp: str,
+    ) -> dict[str, Any]:
+        """Classify an incoming email reply and generate the appropriate response."""
+        prompt = self._build_prompt("reply_handler", {
+            "prospect_name": prospect_name,
+            "company": company,
+            "reply_text": reply_text,
+            "original_email_stage": str(original_email_stage),
+            "icp": icp,
+        })
+        return self._call_llm(prompt)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 # Ensure the project root is on sys.path so scripts can import each other
@@ -42,6 +43,53 @@ MAX_COMMENTS = 10
 MAX_CONNECTIONS = 25
 MAX_EMAILS = 20
 CONFIDENCE_THRESHOLD = 0.7
+
+# ── Sequence Configuration ─────────────────────────────────────────
+# Day offsets from first email (Day 1 = offset 0)
+SEQUENCE_DAYS: dict[str, list[int]] = {
+    "saas":   [0, 3, 7, 13, 20],   # 5 emails: Day 1, 4, 8, 14, 21
+    "agency": [0, 4, 9, 17],        # 4 emails: Day 1, 5, 10, 18
+    "sme":    [0, 4, 9, 17],        # 4 emails: Day 1, 5, 10, 18
+}
+
+# Terminal reply statuses — stop the sequence, do not send more emails
+TERMINAL_REPLY_STATUSES = {
+    "positive", "audit_sent", "audit_followup_sent",
+    "not_now", "has_vendor", "unsubscribe", "hostile",
+}
+
+
+def _days_since(date_str: str) -> int:
+    """Return number of days since the given ISO date string."""
+    try:
+        return (date.today() - date.fromisoformat(date_str)).days
+    except ValueError:
+        return 0
+
+
+def _should_send_next_email(last_email_date_str: str, current_stage: int, icp: str) -> bool:
+    """Check if enough days have passed to send the next sequence email."""
+    days_map = SEQUENCE_DAYS.get(icp, SEQUENCE_DAYS["sme"])
+    next_stage_index = current_stage  # 0-based index into days_map for the NEXT email
+
+    if current_stage == 0:
+        return True  # No emails sent yet — always eligible
+
+    if next_stage_index >= len(days_map):
+        return False  # Sequence complete
+
+    if not last_email_date_str:
+        return True
+
+    try:
+        last_date = date.fromisoformat(last_email_date_str)
+    except ValueError:
+        logger.warning("Invalid last_email_date format: %s", last_email_date_str)
+        return False
+
+    required_gap = days_map[next_stage_index] - days_map[next_stage_index - 1]
+    days_elapsed = (date.today() - last_date).days
+    return days_elapsed >= required_gap
 
 
 def run_post_workflow(
@@ -247,24 +295,178 @@ def run_outreach_workflow(
             else:
                 sheet.log_activity("linkedin", "follow_up_dm", name, "SKIPPED", text, evidence)
 
-        # ── Email ──
-        if email and gmail.can_send:
-            draft = claude.generate_email(name, company, title, email, research_text)
-            confidence = draft.get("confidence_score", 0.0)
-            subject = draft.get("subject", "")
-            body = draft.get("draft_text", "")
-            evidence = draft.get("evidence_snippets", [])
+        # ── Email Sequence ──
+        if not email or not gmail.can_send or counts["emails"] >= MAX_EMAILS:
+            continue
 
-            if confidence >= CONFIDENCE_THRESHOLD and body:
-                result = gmail.send_email(email, subject, body)
-                status = result["status"]
-                sheet.log_activity("email", "outreach_email", name, status, body, evidence)
-                if status == "SENT":
-                    counts["emails"] += 1
-            else:
-                sheet.log_activity("email", "outreach_email", name, "SKIPPED", body, evidence)
+        icp = prospect.get("icp", "").lower().strip()
+        if icp not in ("saas", "agency", "sme"):
+            logger.info("Skipping email for %s: missing or invalid icp='%s'", name, icp)
+            sheet.log_activity("email", "sequence_email", name, "SKIPPED_NO_ICP", "", [])
+            continue
+
+        # Check DNC flag
+        if prospect.get("dnc", "").lower() == "yes":
+            logger.info("Skipping %s: DNC flag set", name)
+            continue
+
+        # Check terminal reply status
+        reply_status = prospect.get("reply_status", "none").lower().strip()
+        if reply_status in TERMINAL_REPLY_STATUSES:
+            logger.info("Skipping %s: terminal reply_status='%s'", name, reply_status)
+            continue
+
+        # Post-audit follow-up (special case)
+        last_email_date = prospect.get("last_email_date", "")
+        if reply_status == "audit_sent" and last_email_date and _days_since(last_email_date) >= 5:
+            first_name = name.split()[0] if name else "there"
+            follow_up_body = (
+                f"Hi {first_name},\n\n"
+                "Just checking in \u2014 did you get a chance to look at the audit I sent over?\n\n"
+                "Happy to walk through it if helpful.\n\n"
+                "Ankit\nLuma Growth Lab"
+            )
+            result = gmail.send_email(email, "Quick check-in on the audit", follow_up_body)
+            sheet.log_activity("email", "post_audit_followup", name, result["status"], follow_up_body, [])
+            if result["status"] == "SENT":
+                counts["emails"] += 1
+                sheet.update_prospect_reply_status(prospect_email=email, reply_status="audit_followup_sent")
+            continue
+
+        # Determine sequence stage
+        try:
+            current_stage = int(prospect.get("sequence_stage", "0") or "0")
+        except ValueError:
+            current_stage = 0
+
+        max_stages = len(SEQUENCE_DAYS.get(icp, []))
+
+        if current_stage >= max_stages:
+            logger.info("Skipping %s: sequence complete (stage %d/%d)", name, current_stage, max_stages)
+            continue
+
+        if not _should_send_next_email(last_email_date, current_stage, icp):
+            logger.info("Skipping %s: not enough days since last email (stage=%d, last=%s)", name, current_stage, last_email_date)
+            continue
+
+        next_stage = current_stage + 1
+        logger.info("Sending sequence email %d/%d for %s (%s, %s)", next_stage, max_stages, name, icp, company)
+
+        draft = claude.generate_sequence_email(
+            prospect_name=name,
+            company=company,
+            title=title,
+            email=email,
+            research=research_text,
+            icp=icp,
+            stage=next_stage,
+        )
+        confidence = draft.get("confidence_score", 0.0)
+        subject = draft.get("subject", "")
+        body = draft.get("draft_text", "")
+        evidence = draft.get("evidence_snippets", [])
+
+        if confidence < CONFIDENCE_THRESHOLD or not body:
+            logger.info("Skipping email (confidence=%.2f): %s", confidence, name)
+            sheet.log_activity("email", f"sequence_email_stage_{next_stage}", name, "SKIPPED", body, evidence)
+            continue
+
+        result = gmail.send_email(email, subject, body)
+        status = result["status"]
+        sheet.log_activity("email", f"sequence_email_stage_{next_stage}", name, status, body, evidence)
+        if status == "SENT":
+            counts["emails"] += 1
+            sheet.update_prospect_sequence(
+                prospect_email=email,
+                sequence_stage=next_stage,
+                last_email_date=date.today().isoformat(),
+            )
 
     return counts
+
+
+def run_email_reply_workflow(
+    sheet: SheetClient,
+    claude: ClaudeClient,
+    gmail: GmailSender,
+) -> int:
+    """Process manually-entered email replies from the Inbound tab. Returns count processed."""
+    replies = sheet.get_inbound_replies()
+    processed = 0
+
+    for reply_row in replies:
+        prospect_email = reply_row.get("prospect_email", "").strip()
+        reply_text = reply_row.get("reply_text", "").strip()
+        if not prospect_email or not reply_text:
+            continue
+
+        # Look up the prospect
+        all_prospects = sheet.get_prospects(status_filter="")
+        prospect = next(
+            (p for p in all_prospects if p.get("email", "").lower() == prospect_email.lower()),
+            None,
+        )
+        if not prospect:
+            logger.warning("Reply from unknown prospect email: %s", prospect_email)
+            continue
+
+        name = prospect.get("name", "Unknown")
+        company = prospect.get("company", "")
+        icp = prospect.get("icp", "sme").lower()
+        try:
+            current_stage = int(prospect.get("sequence_stage", "1") or "1")
+        except ValueError:
+            current_stage = 1
+
+        logger.info("Processing reply from %s (%s)", name, prospect_email)
+
+        result = claude.classify_and_respond_reply(
+            prospect_name=name,
+            company=company,
+            reply_text=reply_text,
+            original_email_stage=current_stage,
+            icp=icp,
+        )
+
+        reply_type = result.get("reply_type", "unknown")
+        draft_text = result.get("draft_text", "")
+        is_dnc = result.get("dnc", False)
+        follow_up_date = result.get("follow_up_date")
+        confidence = result.get("confidence_score", 0.0)
+
+        # Handle DNC (unsubscribe / hostile)
+        if is_dnc or reply_type in ("unsubscribe", "hostile"):
+            sheet.update_prospect_reply_status(prospect_email=prospect_email, reply_status=reply_type, dnc="yes")
+            sheet.log_activity("email", "reply_dnc", name, "DNC_SET", reply_text[:200], [])
+            sheet.mark_inbound_processed(prospect_email)
+            logger.info("DNC set for %s (type: %s)", name, reply_type)
+            processed += 1
+            continue
+
+        # Update reply status
+        sheet.update_prospect_reply_status(prospect_email=prospect_email, reply_status=reply_type)
+
+        # Log follow-up date for "not_now" replies
+        if reply_type == "not_now" and follow_up_date:
+            logger.info("Follow-up date for %s: %s", name, follow_up_date)
+            sheet.log_activity("email", "follow_up_scheduled", name, "INFO", f"Follow-up on: {follow_up_date}", [])
+
+        # Send the response email
+        if draft_text and confidence >= CONFIDENCE_THRESHOLD and gmail.can_send:
+            send_result = gmail.send_email(
+                to_email=prospect_email,
+                subject="Re: following up",
+                body=draft_text,
+            )
+            sheet.log_activity("email", f"reply_response_{reply_type}", name, send_result["status"], draft_text, [])
+            logger.info("Reply response sent to %s (type=%s, status=%s)", name, reply_type, send_result["status"])
+        elif not draft_text:
+            logger.info("No response generated for reply type '%s' from %s", reply_type, name)
+
+        sheet.mark_inbound_processed(prospect_email)
+        processed += 1
+
+    return processed
 
 
 def main() -> None:
@@ -329,6 +531,11 @@ def main() -> None:
             outreach_counts["dms"],
             outreach_counts["emails"],
         )
+
+        # ── Phase 5: Email Reply Processing ──
+        logger.info("── Phase 5: Email Reply Processing ──")
+        replies_processed = run_email_reply_workflow(sheet, claude, gmail)
+        logger.info("Email replies processed: %d", replies_processed)
 
     except Exception as e:
         logger.exception("Fatal error in orchestrator: %s", e)

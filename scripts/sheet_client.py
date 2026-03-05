@@ -22,9 +22,15 @@ TAB_TARGETS = "Targets"
 TAB_INBOUND = "Inbound"
 TAB_ACTIVITIES = "Activities"
 
-PROSPECT_COLUMNS = ["name", "company", "title", "linkedin_url", "email", "status", "notes"]
+PROSPECT_COLUMNS = [
+    "name", "company", "title", "linkedin_url", "email", "status", "notes",
+    "icp", "sequence_stage", "last_email_date", "reply_status", "dnc",
+]
 TARGET_COLUMNS = ["post_url", "topic", "priority", "status"]
-INBOUND_COLUMNS = ["sender_name", "sender_url", "message_text", "received_at", "status"]
+INBOUND_COLUMNS = [
+    "sender_name", "sender_url", "message_text", "received_at", "status",
+    "prospect_email", "reply_text",
+]
 ACTIVITY_COLUMNS = [
     "timestamp_utc", "channel", "activity_type", "prospect_name",
     "status", "sent_at", "draft_text", "evidence_snippets",
@@ -132,3 +138,103 @@ class SheetClient:
             valueInputOption="RAW",
             body={"values": [[value]]},
         ).execute()
+
+    def update_prospect_sequence(
+        self,
+        prospect_email: str,
+        sequence_stage: int,
+        last_email_date: str,
+        reply_status: str | None = None,
+        dnc: str | None = None,
+    ) -> bool:
+        """Update sequence tracking columns for a prospect identified by email."""
+        result = self.sheets.values().get(
+            spreadsheetId=self.sheet_id,
+            range=f"{TAB_PROSPECTS}!A2:L",
+        ).execute()
+        rows = result.get("values", [])
+
+        for idx, row in enumerate(rows):
+            padded = row + [""] * (12 - len(row))
+            if padded[4].strip().lower() == prospect_email.strip().lower():
+                sheet_row = idx + 2
+                updates = [
+                    {"range": f"{TAB_PROSPECTS}!I{sheet_row}", "values": [[str(sequence_stage)]]},
+                    {"range": f"{TAB_PROSPECTS}!J{sheet_row}", "values": [[last_email_date]]},
+                ]
+                if reply_status is not None:
+                    updates.append({"range": f"{TAB_PROSPECTS}!K{sheet_row}", "values": [[reply_status]]})
+                if dnc is not None:
+                    updates.append({"range": f"{TAB_PROSPECTS}!L{sheet_row}", "values": [[dnc]]})
+
+                self.sheets.values().batchUpdate(
+                    spreadsheetId=self.sheet_id,
+                    body={"valueInputOption": "RAW", "data": updates},
+                ).execute()
+                logger.info("Updated sequence for %s: stage=%d, date=%s", prospect_email, sequence_stage, last_email_date)
+                return True
+
+        logger.warning("Prospect with email %s not found in sheet", prospect_email)
+        return False
+
+    def update_prospect_reply_status(
+        self,
+        prospect_email: str,
+        reply_status: str,
+        dnc: str = "",
+    ) -> bool:
+        """Update reply_status and optional dnc flag for a prospect."""
+        result = self.sheets.values().get(
+            spreadsheetId=self.sheet_id,
+            range=f"{TAB_PROSPECTS}!A2:L",
+        ).execute()
+        rows = result.get("values", [])
+
+        for idx, row in enumerate(rows):
+            padded = row + [""] * (12 - len(row))
+            if padded[4].strip().lower() == prospect_email.strip().lower():
+                sheet_row = idx + 2
+                updates = [{"range": f"{TAB_PROSPECTS}!K{sheet_row}", "values": [[reply_status]]}]
+                if dnc:
+                    updates.append({"range": f"{TAB_PROSPECTS}!L{sheet_row}", "values": [[dnc]]})
+                self.sheets.values().batchUpdate(
+                    spreadsheetId=self.sheet_id,
+                    body={"valueInputOption": "RAW", "data": updates},
+                ).execute()
+                logger.info("Updated reply_status for %s: %s (dnc=%s)", prospect_email, reply_status, dnc)
+                return True
+
+        logger.warning("Prospect with email %s not found for reply update", prospect_email)
+        return False
+
+    def get_inbound_replies(self) -> list[dict[str, str]]:
+        """Get unprocessed inbound email replies (rows with prospect_email + reply_text)."""
+        all_inbound = self._read_tab(TAB_INBOUND, INBOUND_COLUMNS)
+        return [
+            row for row in all_inbound
+            if row.get("prospect_email")
+            and row.get("reply_text")
+            and row.get("status", "").lower() != "processed"
+        ]
+
+    def mark_inbound_processed(self, prospect_email: str) -> None:
+        """Mark an inbound reply row as processed by prospect_email match."""
+        result = self.sheets.values().get(
+            spreadsheetId=self.sheet_id,
+            range=f"{TAB_INBOUND}!A2:G",
+        ).execute()
+        rows = result.get("values", [])
+        email_col_idx = INBOUND_COLUMNS.index("prospect_email")
+        status_col_letter = chr(ord("A") + INBOUND_COLUMNS.index("status"))
+
+        for idx, row in enumerate(rows):
+            padded = row + [""] * (len(INBOUND_COLUMNS) - len(row))
+            if padded[email_col_idx].strip().lower() == prospect_email.strip().lower():
+                sheet_row = idx + 2
+                self.sheets.values().update(
+                    spreadsheetId=self.sheet_id,
+                    range=f"{TAB_INBOUND}!{status_col_letter}{sheet_row}",
+                    valueInputOption="RAW",
+                    body={"values": [["processed"]]},
+                ).execute()
+                return
