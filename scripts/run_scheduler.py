@@ -47,9 +47,10 @@ CONFIDENCE_THRESHOLD = 0.7
 # ── Sequence Configuration ─────────────────────────────────────────
 # Day offsets from first email (Day 1 = offset 0)
 SEQUENCE_DAYS: dict[str, list[int]] = {
-    "saas":   [0, 3, 7, 13, 20],   # 5 emails: Day 1, 4, 8, 14, 21
-    "agency": [0, 4, 9, 17],        # 4 emails: Day 1, 5, 10, 18
-    "sme":    [0, 4, 9, 17],        # 4 emails: Day 1, 5, 10, 18
+    "saas":      [0, 3, 7, 13, 20],   # 5 emails: Day 1, 4, 8, 14, 21
+    "agency":    [0, 4, 9, 17],        # 4 emails: Day 1, 5, 10, 18
+    "sme":       [0, 4, 9, 17],        # 4 emails: Day 1, 5, 10, 18
+    "prelaunch": [0, 4, 9, 17],        # 4 emails: Day 1, 5, 10, 18
 }
 
 # Terminal reply statuses — stop the sequence, do not send more emails
@@ -300,7 +301,7 @@ def run_outreach_workflow(
             continue
 
         icp = prospect.get("icp", "").lower().strip()
-        if icp not in ("saas", "agency", "sme"):
+        if icp not in ("saas", "agency", "sme", "prelaunch"):
             logger.info("Skipping email for %s: missing or invalid icp='%s'", name, icp)
             sheet.log_activity("email", "sequence_email", name, "SKIPPED_NO_ICP", "", [])
             continue

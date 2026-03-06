@@ -51,6 +51,22 @@ Worked with a similar business in their sector. Before: almost no online visibil
 **Email 4 (Day 18) — The Quiet Exit**
 Last email. "If online leads aren't a priority right now, completely understand. If that changes, feel free to reach out."
 
+### Sequence D: Pre-Launch Founders (`icp = prelaunch`) — 4 emails
+
+For founders, professionals, or experts who are about to start their own venture but haven't launched yet. They don't have a website, SEO presence, or pipeline to audit. The offer here is NOT an audit of what exists — it's a **free launch roadmap**: positioning, digital presence blueprint, and first-client acquisition strategy.
+
+**Email 1 (Day 1) — The Acknowledge**
+Reference their background/expertise from research (their current role, education, domain knowledge). Acknowledge the leap they're making — going from employed/studying to building something of their own. Name the real challenge: most experts are great at what they do but don't know how to get their first clients or build an online presence from scratch. Offer a free launch roadmap — "I'll map out how to position yourself online, where your first clients are likely to come from, and what to build first. Sent as a document, no call."
+
+**Email 2 (Day 5) — The Clarity Drop**
+Follow up with a useful insight: most new ventures fail not because the skill isn't there, but because they start building before they know who they're building for. Share one specific positioning insight relevant to their domain (e.g., "conservation architects who niche into heritage restoration projects get found faster than generalists"). The launch roadmap covers exactly this — who to target, how to be found, what to say.
+
+**Email 3 (Day 10) — The Proof**
+Reference a real-ish outcome from someone at a similar stage. Before: expert with no online presence, relying on word of mouth. After: clear positioning, showing up in searches for their niche, first inbound enquiries within 60 days. The roadmap maps what that looks like for their specific expertise.
+
+**Email 4 (Day 18) — The Goodbye**
+Last note. "Starting something new is hard enough without unsolicited emails. If building your online presence becomes a priority, I'm easy to find. Good luck with the venture."
+
 ## Style Rules
 
 - Subject lines: specific, under 55 characters, no clickbait, no question marks for emails 2+.
@@ -82,7 +98,7 @@ You will receive:
 - `prospect_name`: The person's name.
 - `company`: Their company.
 - `title`: Their job title.
-- `icp`: One of "saas", "agency", "sme".
+- `icp`: One of "saas", "agency", "sme", "prelaunch".
 - `stage`: Integer 1-5. Which email in the sequence to generate.
 - `research`: Research brief on this prospect.
 - `signals`: Specific trigger signals (may be empty).
@@ -93,7 +109,7 @@ You will receive:
 ```json
 {
   "content_type": "sequence_email",
-  "icp": "<saas|agency|sme>",
+  "icp": "<saas|agency|sme|prelaunch>",
   "stage": <1-5>,
   "subject": "<email subject line under 55 chars>",
   "draft_text": "<email body — use \\n\\n between paragraphs, \\n within sign-off block>",
