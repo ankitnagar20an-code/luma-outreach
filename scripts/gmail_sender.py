@@ -15,7 +15,10 @@ from googleapiclient.discovery import build
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
+]
 DEFAULT_DAILY_CAP = 20
 
 
@@ -116,3 +119,79 @@ class GmailSender:
         except Exception as e:
             logger.error("Failed to send email to %s: %s", to_email, e)
             return {"status": "FAILED", "error": str(e)}
+
+    def get_replies(self, prospect_emails: list[str], since_hours: int = 48) -> list[dict]:
+        """
+        Check inbox for replies from prospect emails.
+
+        Returns list of dicts: {from_email, subject, body, message_id, date}
+        Only returns emails received in the last `since_hours` hours.
+        """
+        from datetime import datetime, timedelta, timezone
+        import email.utils
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        replies: list[dict] = []
+
+        for prospect_email in prospect_emails:
+            try:
+                result = self.service.users().messages().list(
+                    userId="me",
+                    q=f"from:{prospect_email} is:inbox",
+                    maxResults=5,
+                ).execute()
+
+                for msg_meta in result.get("messages", []):
+                    msg = self.service.users().messages().get(
+                        userId="me", id=msg_meta["id"], format="full",
+                    ).execute()
+                    headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+
+                    # Check date
+                    date_str = headers.get("Date", "")
+                    if date_str:
+                        parsed = email.utils.parsedate_to_datetime(date_str)
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        if parsed < cutoff:
+                            continue
+
+                    # Extract plain text body
+                    body = self._extract_body(msg["payload"])
+
+                    # Strip quoted reply (everything after "On ... wrote:")
+                    clean_body = self._strip_quoted_reply(body)
+
+                    replies.append({
+                        "from_email": prospect_email,
+                        "subject": headers.get("Subject", ""),
+                        "body": clean_body.strip(),
+                        "message_id": msg_meta["id"],
+                        "date": date_str,
+                    })
+
+            except Exception as e:
+                logger.error("Failed to check replies from %s: %s", prospect_email, e)
+
+        return replies
+
+    @staticmethod
+    def _extract_body(payload: dict) -> str:
+        """Extract plain text body from Gmail message payload."""
+        if "parts" in payload:
+            for part in payload["parts"]:
+                if part["mimeType"] == "text/plain" and "data" in part.get("body", {}):
+                    return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
+        elif "body" in payload and "data" in payload["body"]:
+            return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+        return ""
+
+    @staticmethod
+    def _strip_quoted_reply(text: str) -> str:
+        """Remove quoted original email from a reply (everything after 'On ... wrote:')."""
+        import re
+        # Match "On <date>, <email> wrote:" pattern
+        match = re.search(r"\nOn .+wrote:\s*$", text, re.MULTILINE | re.DOTALL)
+        if match:
+            return text[:match.start()]
+        return text

@@ -391,24 +391,40 @@ def run_email_reply_workflow(
     claude: ClaudeClient,
     gmail: GmailSender,
 ) -> int:
-    """Process manually-entered email replies from the Inbound tab. Returns count processed."""
-    replies = sheet.get_inbound_replies()
-    processed = 0
+    """Auto-detect and process email replies from prospects. Returns count processed."""
+    # Get all active prospects with emails (to know who to check for replies)
+    all_prospects = sheet.get_prospects(status_filter="")
+    prospect_emails = [
+        p.get("email", "").strip().lower()
+        for p in all_prospects
+        if p.get("email", "").strip()
+        and p.get("dnc", "").lower() != "yes"
+        and p.get("reply_status", "none").lower() == "none"
+    ]
 
-    for reply_row in replies:
-        prospect_email = reply_row.get("prospect_email", "").strip()
-        reply_text = reply_row.get("reply_text", "").strip()
-        if not prospect_email or not reply_text:
+    if not prospect_emails:
+        logger.info("No prospects to check replies for")
+        return 0
+
+    # Check Gmail inbox for replies
+    logger.info("Checking inbox for replies from %d prospects...", len(prospect_emails))
+    replies = gmail.get_replies(prospect_emails, since_hours=48)
+    logger.info("Found %d replies", len(replies))
+
+    processed = 0
+    for reply in replies:
+        prospect_email = reply["from_email"]
+        reply_text = reply["body"]
+
+        if not reply_text:
             continue
 
         # Look up the prospect
-        all_prospects = sheet.get_prospects(status_filter="")
         prospect = next(
             (p for p in all_prospects if p.get("email", "").lower() == prospect_email.lower()),
             None,
         )
         if not prospect:
-            logger.warning("Reply from unknown prospect email: %s", prospect_email)
             continue
 
         name = prospect.get("name", "Unknown")
@@ -419,7 +435,7 @@ def run_email_reply_workflow(
         except ValueError:
             current_stage = 1
 
-        logger.info("Processing reply from %s (%s)", name, prospect_email)
+        logger.info("Processing reply from %s (%s): %s", name, prospect_email, reply_text[:100])
 
         result = claude.classify_and_respond_reply(
             prospect_name=name,
@@ -439,7 +455,6 @@ def run_email_reply_workflow(
         if is_dnc or reply_type in ("unsubscribe", "hostile"):
             sheet.update_prospect_reply_status(prospect_email=prospect_email, reply_status=reply_type, dnc="yes")
             sheet.log_activity("email", "reply_dnc", name, "DNC_SET", reply_text[:200], [])
-            sheet.mark_inbound_processed(prospect_email)
             logger.info("DNC set for %s (type: %s)", name, reply_type)
             processed += 1
             continue
@@ -454,9 +469,13 @@ def run_email_reply_workflow(
 
         # Send the response email
         if draft_text and confidence >= CONFIDENCE_THRESHOLD and gmail.can_send:
+            # Use the reply subject for threading
+            reply_subject = reply.get("subject", "Re: following up")
+            if not reply_subject.lower().startswith("re:"):
+                reply_subject = f"Re: {reply_subject}"
             send_result = gmail.send_email(
                 to_email=prospect_email,
-                subject="Re: following up",
+                subject=reply_subject,
                 body=draft_text,
             )
             sheet.log_activity("email", f"reply_response_{reply_type}", name, send_result["status"], draft_text, [])
@@ -464,7 +483,6 @@ def run_email_reply_workflow(
         elif not draft_text:
             logger.info("No response generated for reply type '%s' from %s", reply_type, name)
 
-        sheet.mark_inbound_processed(prospect_email)
         processed += 1
 
     return processed
